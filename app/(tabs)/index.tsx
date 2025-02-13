@@ -1,119 +1,413 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   View,
   Text,
   StyleSheet,
-  TextInput,
-  TouchableOpacity,
+  ActivityIndicator,
   ScrollView,
-  Platform,
-  Button,
 } from 'react-native';
+import { useFocusEffect } from '@react-navigation/native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { Ionicons } from '@expo/vector-icons';
 
-interface Expense {
+interface SocialCharge {
   id: string;
-  description: string;
+  type: string;
+  status: string;
+  month: string;
   amount: number;
-  date: string;
+  vatAmount: number;
+}
+
+interface Settings {
+  urssafRate: number;
+  isVatEnabled: boolean;
+}
+
+interface ValidatedCA {
+  amount: number;
+  vat: number;
+  month: string;
+  validatedAt: string;
 }
 
 export default function ExpensesScreen() {
-  const [expenses, setExpenses] = useState<Expense[]>([]);
-  const [description, setDescription] = useState('');
-  const [amount, setAmount] = useState('');
+  const [charges, setCharges] = useState<SocialCharge[]>([]);
+  const [settings, setSettings] = useState<Settings>({
+    urssafRate: 23.1,
+    isVatEnabled: false,
+  });
+  const [loading, setLoading] = useState(true);
+  const [validatedCA, setValidatedCA] = useState<ValidatedCA | null>(null);
+  const [currentMonthCA, setCurrentMonthCA] = useState({ amount: 0, vat: 0 });
+  const [currentMonthVAT, setCurrentMonthVAT] = useState<{ amount: number; month: string } | null>(null);
+  const [yearlyVAT, setYearlyVAT] = useState<{ total: number; year: number } | null>(null);
 
-  useEffect(() => {
-    loadExpenses();
+  const loadData = useCallback(async () => {
+    setLoading(true);
+    try {
+      await Promise.all([
+        loadCharges(),
+        loadSettings(),
+        loadValidatedCA(),
+        loadCurrentMonthCA(),
+        loadCurrentMonthVAT(),
+        loadYearlyVAT(),
+      ]);
+    } catch (error) {
+      console.error('Erreur lors du chargement des données:', error);
+    }
+    setLoading(false);
   }, []);
 
-  const loadExpenses = async () => {
+  // Recharge les données chaque fois que l'écran devient actif
+  useFocusEffect(
+    useCallback(() => {
+      loadData();
+    }, [loadData])
+  );
+
+  const loadSettings = async () => {
     try {
-      const storedExpenses = await AsyncStorage.getItem('expenses');
-      if (storedExpenses) {
-        setExpenses(JSON.parse(storedExpenses));
+      const storedSettings = await AsyncStorage.getItem('companySettings');
+      if (storedSettings) {
+        setSettings(JSON.parse(storedSettings));
       }
     } catch (error) {
-      console.error('Erreur lors du chargement des dépenses:', error);
+      console.error('Erreur lors du chargement des paramètres:', error);
     }
   };
 
-  const saveExpenses = async (newExpenses: Expense[]) => {
+  const loadCharges = async () => {
     try {
-      await AsyncStorage.setItem('expenses', JSON.stringify(newExpenses));
+      const storedCharges = await AsyncStorage.getItem('charges');
+      if (storedCharges) {
+        setCharges(JSON.parse(storedCharges));
+      }
     } catch (error) {
-      console.error('Erreur lors de la sauvegarde des dépenses:', error);
+      console.error('Erreur lors du chargement des charges:', error);
     }
   };
 
-  const addExpense = () => {
-    if (description.trim() && amount) {
-      const newExpense: Expense = {
-        id: Date.now().toString(),
-        description: description.trim(),
-        amount: parseFloat(amount),
-        date: new Date().toISOString(),
-      };
-      const newExpenses = [...expenses, newExpense];
-      setExpenses(newExpenses);
-      saveExpenses(newExpenses);
-      setDescription('');
-      setAmount('');
+  const loadValidatedCA = async () => {
+    try {
+      const storedCA = await AsyncStorage.getItem('validatedCA');
+      if (storedCA) {
+        setValidatedCA(JSON.parse(storedCA));
+      }
+    } catch (error) {
+      console.error('Erreur lors du chargement du CA validé:', error);
     }
   };
 
-  const deleteExpense = (id: string) => {
-    const newExpenses = expenses.filter(expense => expense.id !== id);
-    setExpenses(newExpenses);
-    saveExpenses(newExpenses);
+  const loadCurrentMonthCA = async () => {
+    try {
+      const storedCharges = await AsyncStorage.getItem('charges');
+      if (storedCharges) {
+        const allCharges = JSON.parse(storedCharges);
+        const currentDate = new Date();
+        const currentMonthKey = new Date(currentDate.getFullYear(), currentDate.getMonth(), 1).toISOString();
+        
+        let totalAmount = 0;
+        let totalVAT = 0;
+        
+        allCharges.forEach((charge: SocialCharge) => {
+          if (charge.type === 'CA Mensuel' && charge.month === currentMonthKey) {
+            totalAmount += charge.amount || 0;
+            totalVAT += charge.vatAmount || 0;
+          }
+        });
+        
+        setCurrentMonthCA({ amount: totalAmount, vat: totalVAT });
+      }
+    } catch (error) {
+      console.error('Erreur lors du chargement du CA du mois:', error);
+    }
   };
 
-  const totalExpenses = expenses.reduce((sum, expense) => sum + expense.amount, 0);
+  const loadCurrentMonthVAT = async () => {
+    try {
+      const storedVAT = await AsyncStorage.getItem('@currentMonthVAT');
+      if (storedVAT) {
+        setCurrentMonthVAT(JSON.parse(storedVAT));
+      }
+    } catch (error) {
+      console.error('Erreur lors du chargement de la TVA du mois:', error);
+    }
+  };
+
+  const loadYearlyVAT = async () => {
+    try {
+      const currentYear = new Date().getFullYear();
+      const storedVAT = await AsyncStorage.getItem(`@yearlyVAT_${currentYear}`);
+      if (storedVAT) {
+        setYearlyVAT(JSON.parse(storedVAT));
+      }
+    } catch (error) {
+      console.error('Erreur lors du chargement de la TVA annuelle:', error);
+    }
+  };
+
+  // Fonction pour formater la date en mois/année
+  const formatMonthYear = (date: Date | string): string => {
+    try {
+      if (!date) return '';
+      
+      const dateObject = typeof date === 'string' ? new Date(date) : date;
+      
+      // Vérifier si la date est valide
+      if (isNaN(dateObject.getTime())) {
+        return '';
+      }
+      
+      return new Intl.DateTimeFormat('fr-FR', { month: 'long', year: 'numeric' }).format(dateObject);
+    } catch (error) {
+      console.error('Erreur de formatage de date:', error);
+      return '';
+    }
+  };
+
+  // Fonction pour grouper les charges par mois
+  const getMonthlyCharges = () => {
+    interface MonthlyDataType {
+      month: Date;
+      charges: number;
+      vat: number;
+      formation: number;
+      total: number;
+    }
+
+    const monthlyDataMap = new Map<string, MonthlyDataType>();
+
+    charges.forEach(charge => {
+      if (charge.type === 'CA Mensuel' && charge.status === 'pending') {
+        try {
+          // Convertir la chaîne de date en objet Date
+          const chargeDate = new Date(charge.month);
+          if (isNaN(chargeDate.getTime())) {
+            console.error('Date invalide:', charge.month);
+            return;
+          }
+
+          const monthKey = charge.month;
+          if (!monthlyDataMap.has(monthKey)) {
+            monthlyDataMap.set(monthKey, {
+              month: chargeDate,
+              charges: 0,
+              vat: 0,
+              formation: 0,
+              total: 0
+            });
+          }
+
+          const monthData = monthlyDataMap.get(monthKey)!;
+          const chargeAmount = charge.amount || 0;
+          const urssafCharges = (chargeAmount * settings.urssafRate / 100);
+          const formationCharges = (chargeAmount * 0.2 / 100);
+
+          monthData.charges += urssafCharges;
+          monthData.vat += (charge.vatAmount || 0);
+          monthData.formation += formationCharges;
+          monthData.total = monthData.charges + monthData.formation;
+        } catch (error) {
+          console.error('Erreur lors du traitement de la charge:', error);
+        }
+      }
+    });
+
+    // Convertir la Map en tableau et trier par date
+    return Array.from(monthlyDataMap.values()).sort((a, b) => b.month.getTime() - a.month.getTime());
+  };
+
+  const monthlyCharges = getMonthlyCharges();
+
+  // Fonction pour calculer les totaux du mois en cours
+  const calculateMonthlyTotals = () => {
+    const currentDate = new Date();
+    const currentMonthKey = new Date(currentDate.getFullYear(), currentDate.getMonth(), 1).toISOString();
+    
+    let totalHT = 0;
+    let totalVAT = 0;
+    
+    charges.forEach(charge => {
+      if (charge.type === 'CA Mensuel' && charge.month === currentMonthKey) {
+        totalHT += charge.amount || 0;
+        totalVAT += charge.vatAmount || 0;
+      }
+    });
+
+    const chargesURSSAF = totalHT * settings.urssafRate / 100;
+    const formationFee = totalHT * 0.2 / 100;
+    const totalToPay = chargesURSSAF + formationFee;
+
+    return {
+      totalHT,
+      chargesURSSAF,
+      formationFee,
+      totalToPay,
+      totalVAT
+    };
+  };
+
+  // Fonction pour calculer les totaux annuels
+  const calculateYearlyTotals = () => {
+    const currentDate = new Date();
+    const currentYear = currentDate.getFullYear();
+    
+    let totalHT = 0;
+    let totalVAT = yearlyVAT?.total || 0;
+    
+    charges.forEach(charge => {
+      if (charge.type === 'CA Mensuel') {
+        const chargeDate = new Date(charge.month || '');
+        if (chargeDate.getFullYear() === currentYear) {
+          totalHT += charge.amount || 0;
+        }
+      }
+    });
+
+    return {
+      totalHT,
+      totalVAT,
+      year: currentYear
+    };
+  };
+
+  const monthlyTotals = calculateMonthlyTotals();
+  const yearlyTotals = calculateYearlyTotals();
+
+  if (loading) {
+    return (
+      <View style={styles.container}>
+        <ActivityIndicator size="large" color="#007AFF" />
+      </View>
+    );
+  }
 
   return (
     <View style={styles.container}>
-      <View style={styles.inputContainer}>
-        <TextInput
-          style={styles.input}
-          placeholder="Nom de la dépense"
-          value={description}
-          onChangeText={setDescription}
-        />
-        <TextInput
-          style={styles.input}
-          placeholder="Montant"
-          value={amount}
-          onChangeText={setAmount}
-          keyboardType="numeric"
-        />
-        <TouchableOpacity style={styles.addButton} onPress={addExpense}>
-          <Text style={styles.addButtonText}>Ajouter une dépense</Text>
-        </TouchableOpacity>
-      </View>
+      <ScrollView style={styles.scrollView}>
+        <View style={styles.header}>
+          <Text style={styles.title}>Charges à payer</Text>
+        </View>
 
-      <View style={styles.totalContainer}>
-        <Text style={styles.totalLabel}>Total des dépenses:</Text>
-        <Text style={styles.totalAmount}>{totalExpenses.toFixed(2)} €</Text>
-      </View>
+        {monthlyCharges.map((monthData) => {
+          // Créer une clé unique sûre
+          const safeKey = typeof monthData.month === 'string' ? monthData.month : 
+            (monthData.month instanceof Date ? monthData.month.toISOString() : Date.now().toString());
+          
+          return (
+            <View key={safeKey} style={styles.monthCard}>
+              <View style={styles.monthHeader}>
+                <Text style={styles.monthTitle}>{formatMonthYear(monthData.month)}</Text>
+              </View>
 
-      <ScrollView style={styles.expensesList}>
-        {expenses.map((expense) => (
-          <View key={expense.id} style={styles.expenseItem}>
-            <View style={styles.expenseInfo}>
-              <Text style={styles.expenseDescription}>{expense.description}</Text>
-              <Text style={styles.expenseAmount}>{expense.amount.toFixed(2)} €</Text>
-              <Text style={styles.expenseDate}>
-                {new Date(expense.date).toLocaleString('fr-FR')}
+              <View style={styles.chargeRow}>
+                <Text style={styles.chargeLabel}>Charges URSSAF ({settings.urssafRate}%):</Text>
+                <Text style={styles.chargeAmount}>{monthData.charges.toFixed(2)} €</Text>
+              </View>
+
+              <View style={styles.chargeRow}>
+                <Text style={styles.chargeLabel}>Formation (0.2%):</Text>
+                <Text style={styles.chargeAmount}>{monthData.formation.toFixed(2)} €</Text>
+              </View>
+
+              {settings.isVatEnabled && (
+                <View style={styles.chargeRow}>
+                  <Text style={styles.chargeLabel}>TVA à reverser:</Text>
+                  <Text style={[styles.chargeAmount, styles.vatAmount]}>
+                    {monthData.vat.toFixed(2)} €
+                  </Text>
+                </View>
+              )}
+
+              <View style={styles.divider} />
+
+              <View style={styles.totalRow}>
+                <Text style={styles.totalLabel}>Total à payer:</Text>
+                <Text style={styles.totalAmount}>
+                  {(monthData.total + monthData.vat).toFixed(2)} €
+                </Text>
+              </View>
+            </View>
+          );
+        })}
+
+        {monthlyCharges.length === 0 && (
+          <View style={styles.emptyState}>
+            <Text style={styles.emptyStateText}>
+              Aucune charge en attente de paiement
+            </Text>
+          </View>
+        )}
+
+        {validatedCA && (
+          <>
+            <View style={styles.header}>
+              <Text style={styles.title}>Dernier CA validé</Text>
+            </View>
+
+            <View style={styles.monthCard}>
+              <View style={styles.monthHeader}>
+                <Text style={styles.monthTitle}>
+                  {formatMonthYear(new Date(validatedCA.month))}
+                </Text>
+                <Text style={styles.validationDate}>
+                  Validé le {new Date(validatedCA.validatedAt).toLocaleDateString('fr-FR')}
+                </Text>
+              </View>
+
+              <View style={styles.chargeRow}>
+                <Text style={styles.chargeLabel}>CA HT:</Text>
+                <Text style={styles.chargeAmount}>{validatedCA.amount.toFixed(2)} €</Text>
+              </View>
+
+              {settings.isVatEnabled && (
+                <View style={styles.chargeRow}>
+                  <Text style={styles.chargeLabel}>TVA:</Text>
+                  <Text style={[styles.chargeAmount, styles.vatAmount]}>
+                    {validatedCA.vat.toFixed(2)} €
+                  </Text>
+                </View>
+              )}
+
+              <View style={styles.totalRow}>
+                <Text style={styles.totalLabel}>Total TTC:</Text>
+                <Text style={styles.totalAmount}>
+                  {(validatedCA.amount + validatedCA.vat).toFixed(2)} €
+                </Text>
+              </View>
+            </View>
+          </>
+        )}
+
+        <View style={[styles.header, styles.yearlyHeader]}>
+          <Text style={styles.title}>Totaux de l'année {yearlyTotals.year}</Text>
+        </View>
+
+        <View style={[styles.monthCard, styles.yearlyCard]}>
+          <View style={styles.chargeRow}>
+            <Text style={styles.chargeLabel}>CA HT total:</Text>
+            <Text style={styles.chargeAmount}>{yearlyTotals.totalHT.toFixed(2)} €</Text>
+          </View>
+
+          {settings.isVatEnabled && (
+            <View style={styles.chargeRow}>
+              <Text style={styles.chargeLabel}>TVA totale:</Text>
+              <Text style={[styles.chargeAmount, styles.vatAmount]}>
+                {yearlyTotals.totalVAT.toFixed(2)} €
               </Text>
             </View>
-            <TouchableOpacity
-              onPress={() => deleteExpense(expense.id)}
-              style={styles.deleteButton}>
-              <Ionicons name="trash-outline" size={20} color="#FF3B30" />
-            </TouchableOpacity>
+          )}
+
+          <View style={styles.divider} />
+
+          <View style={styles.totalRow}>
+            <Text style={styles.totalLabel}>Total TTC:</Text>
+            <Text style={styles.totalAmount}>
+              {(yearlyTotals.totalHT + yearlyTotals.totalVAT).toFixed(2)} €
+            </Text>
           </View>
-        ))}
+        </View>
       </ScrollView>
     </View>
   );
@@ -122,48 +416,76 @@ export default function ExpensesScreen() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#f8f9fa',
+    backgroundColor: '#f2f2f7',
   },
-  inputContainer: {
+  scrollView: {
+    flex: 1,
+    paddingBottom: 32, 
+  },
+  header: {
     padding: 16,
-    backgroundColor: '#ffffff',
+    backgroundColor: '#fff',
     borderBottomWidth: 1,
     borderBottomColor: '#e5e5e5',
+    marginTop: 20, 
   },
-  input: {
-    backgroundColor: '#f8f9fa',
-    padding: 12,
-    borderRadius: 8,
-    marginBottom: 8,
-    fontSize: 16,
-    ...Platform.select({
-      web: {
-        outlineStyle: 'none',
-      },
-    }),
+  title: {
+    fontSize: 22,
+    fontWeight: '700',
+    color: '#1c1c1e',
   },
-  addButton: {
-    backgroundColor: '#007AFF',
-    padding: 12,
-    borderRadius: 8,
-    alignItems: 'center',
+  monthCard: {
+    backgroundColor: '#fff',
+    marginHorizontal: 0,
+    marginTop: 0,
+    marginBottom: 24, 
+    borderRadius: 0,
+    padding: 16,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 3,
   },
-  addButtonText: {
-    color: '#ffffff',
-    fontSize: 16,
+  monthHeader: {
+    marginBottom: 16,
+  },
+  monthTitle: {
+    fontSize: 18,
     fontWeight: '600',
+    color: '#1c1c1e',
   },
-  totalContainer: {
+  validationDate: {
+    fontSize: 14,
+    color: '#666',
+    marginTop: 4,
+  },
+  chargeRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    padding: 16,
-    backgroundColor: '#ffffff',
-    borderBottomWidth: 1,
-    borderBottomColor: '#e5e5e5',
+    marginBottom: 8,
+  },
+  chargeLabel: {
+    fontSize: 15,
+    color: '#666',
+  },
+  chargeAmount: {
+    fontSize: 16,
+    color: '#1c1c1e',
+    fontWeight: '500',
+  },
+  totalRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginTop: 8,
+    paddingTop: 8,
+    borderTopWidth: 1,
+    borderTopColor: '#e5e5e5',
   },
   totalLabel: {
-    fontSize: 18,
+    fontSize: 16,
     fontWeight: '600',
     color: '#1c1c1e',
   },
@@ -172,36 +494,35 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     color: '#007AFF',
   },
-  expensesList: {
-    flex: 1,
+  divider: {
+    height: 1,
+    backgroundColor: '#e5e5e5',
+    marginVertical: 16,
   },
-  expenseItem: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
+  vatRow: {
+    marginTop: 8,
+  },
+  vatAmount: {
+    color: '#FF9500',
+  },
+  highlightedAmount: {
+    fontSize: 24,
+    fontWeight: '700',
+    color: '#007AFF',
+  },
+  emptyState: {
+    padding: 32,
     alignItems: 'center',
-    padding: 16,
-    backgroundColor: '#ffffff',
-    borderBottomWidth: 1,
-    borderBottomColor: '#e5e5e5',
   },
-  expenseInfo: {
-    flex: 1,
-  },
-  expenseDescription: {
+  emptyStateText: {
     fontSize: 16,
-    color: '#1c1c1e',
-    marginBottom: 4,
+    color: '#666',
+    textAlign: 'center',
   },
-  expenseAmount: {
-    fontSize: 14,
-    color: '#8E8E93',
+  yearlyHeader: {
+    marginTop: 32, // Plus d'espace avant la section annuelle
   },
-  expenseDate: {
-    fontSize: 12,
-    color: '#8E8E93',
-    marginTop: 4,
-  },
-  deleteButton: {
-    padding: 8,
+  yearlyCard: {
+    marginBottom: 32, // Plus d'espace après la dernière carte
   },
 });

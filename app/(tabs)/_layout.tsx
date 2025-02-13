@@ -22,7 +22,7 @@ export default function TabLayout() {
       <Tabs.Screen
         name="index"
         options={{
-          title: 'Mes dépenses mensuelles',
+          title: 'Dashboard',
           tabBarIcon: ({ size, color }) => (
             <Ionicons name="wallet-outline" size={size} color={color} />
           ),
