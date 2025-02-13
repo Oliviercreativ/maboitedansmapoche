@@ -18,12 +18,17 @@ interface SocialCharge {
   id: string;
   type: string;
   amount: number;
-  vatRate: number;
-  vatAmount: number;
-  totalAmount: number;
   dueDate: string;
   status: 'pending' | 'paid';
   paymentDate?: string;
+  month: string | null;
+  vatRate?: number;
+  vatAmount?: number;
+  totalAmount?: number;
+  // Nouveaux champs pour les totaux URSSAF
+  totalCharges?: number;
+  formationFee?: number;
+  vatToCollect?: number;
 }
 
 interface Settings {
@@ -34,13 +39,21 @@ interface Settings {
 const CHARGE_TYPES = ['CA Mensuel', 'URSSAF'];
 
 const VAT_RATES = [
-  { label: 'Sans TVA (0%)', value: 0 },
+  { label: 'Non assujetti (0%)', value: 0 },
   { label: 'TVA 5.5%', value: 5.5 },
   { label: 'TVA 10%', value: 10 },
   { label: 'TVA 20%', value: 20 },
 ];
 
 const calculateAmounts = (ttcAmount: number, vatRate: number) => {
+  if (!ttcAmount || isNaN(ttcAmount)) {
+    return {
+      baseAmount: 0,
+      vatAmount: 0,
+      totalAmount: 0
+    };
+  }
+
   if (vatRate === 0) {
     return {
       baseAmount: ttcAmount,
@@ -48,8 +61,11 @@ const calculateAmounts = (ttcAmount: number, vatRate: number) => {
       totalAmount: ttcAmount
     };
   }
+  
+  // Calcul du HT à partir du TTC avec le taux sélectionné
   const baseAmount = ttcAmount / (1 + vatRate / 100);
   const vatAmount = ttcAmount - baseAmount;
+  
   return {
     baseAmount: Math.round(baseAmount * 100) / 100,
     vatAmount: Math.round(vatAmount * 100) / 100,
@@ -57,30 +73,88 @@ const calculateAmounts = (ttcAmount: number, vatRate: number) => {
   };
 };
 
+const formatMonthYear = (date: Date) => {
+  const months = [
+    'Janvier', 'Février', 'Mars', 'Avril', 'Mai', 'Juin',
+    'Juillet', 'Août', 'Septembre', 'Octobre', 'Novembre', 'Décembre'
+  ];
+  return `${months[date.getMonth()]} ${date.getFullYear()}`;
+};
+
 export default function SocialChargesScreen() {
   const [charges, setCharges] = useState<SocialCharge[]>([]);
   const [type, setType] = useState(CHARGE_TYPES[0]);
+  const [amount, setAmount] = useState('');
   const [ttcAmount, setTtcAmount] = useState('');
-  const [vatRate, setVatRate] = useState(VAT_RATES[0].value);
   const [dueDate, setDueDate] = useState(new Date());
-  const [loading, setLoading] = useState(true);
   const [showDatePicker, setShowDatePicker] = useState(false);
   const [editingCharge, setEditingCharge] = useState<SocialCharge | null>(null);
-  const [totalMonthlyRevenue, setTotalMonthlyRevenue] = useState(0);
+  const [loading, setLoading] = useState(true);
   const [settings, setSettings] = useState<Settings>({
     urssafRate: 23.1,
     isVatEnabled: false
   });
+  const [vatRate, setVatRate] = useState(0);
+  const [currentMonth, setCurrentMonth] = useState(new Date());
   const [calculatedAmounts, setCalculatedAmounts] = useState({
     baseAmount: 0,
     vatAmount: 0,
     totalAmount: 0
   });
 
+  // Calcul des totaux
+  const totalMonthlyRevenue = charges
+    .filter(charge => charge.type === 'CA Mensuel' && charge.status === 'pending')
+    .reduce((sum, charge) => sum + charge.amount, 0);
+
+  const totalPending = Math.round(totalMonthlyRevenue * settings.urssafRate) / 100;
+  const formationFee = Math.round(totalMonthlyRevenue * 0.2) / 100; // 0.2% du CA
+  const totalWithFormation = totalPending + formationFee;
+
+  const totalVAT = charges
+    .filter(charge => charge.type === 'CA Mensuel' && charge.status === 'pending')
+    .reduce((sum, charge) => sum + (charge.vatAmount || 0), 0);
+
+  useEffect(() => {
+    if (type === 'URSSAF') {
+      setTtcAmount(totalPending.toFixed(2));
+      setCalculatedAmounts({
+        baseAmount: totalPending,
+        vatAmount: totalVAT,
+        totalAmount: totalPending
+      });
+    } else {
+      setTtcAmount('');
+      setCalculatedAmounts({ baseAmount: 0, vatAmount: 0, totalAmount: 0 });
+    }
+  }, [type, totalPending, totalVAT]);
+
   useEffect(() => {
     loadCharges();
     loadSettings();
   }, []);
+
+  useEffect(() => {
+    // Recalcul des totaux après chaque changement des charges
+    const monthlyRevenue = charges
+      .filter(charge => charge.type === 'CA Mensuel' && charge.status === 'pending')
+      .reduce((sum, charge) => sum + charge.amount, 0);
+
+    const pending = Math.round(monthlyRevenue * settings.urssafRate) / 100;
+    const formation = Math.round(monthlyRevenue * 0.2) / 100;
+    const vat = charges
+      .filter(charge => charge.type === 'CA Mensuel' && charge.status === 'pending')
+      .reduce((sum, charge) => sum + (charge.vatAmount || 0), 0);
+
+    if (type === 'URSSAF') {
+      setTtcAmount(pending.toFixed(2));
+      setCalculatedAmounts({
+        baseAmount: pending,
+        vatAmount: vat,
+        totalAmount: pending + formation
+      });
+    }
+  }, [charges, settings.urssafRate, type]);
 
   const loadSettings = async () => {
     try {
@@ -107,12 +181,6 @@ export default function SocialChargesScreen() {
       if (storedCharges) {
         const parsedCharges = JSON.parse(storedCharges);
         setCharges(parsedCharges);
-        
-        // Calculer le CA total
-        const monthlyRevenue = parsedCharges
-          .filter(charge => charge.type === 'CA Mensuel' && charge.status === 'pending')
-          .reduce((sum, charge) => sum + charge.amount, 0);
-        setTotalMonthlyRevenue(monthlyRevenue);
       }
     } catch (error) {
       console.error('Erreur lors du chargement des charges sociales:', error);
@@ -134,11 +202,12 @@ export default function SocialChargesScreen() {
   const updateAmounts = (newTtc: string, newVatRate: number) => {
     const ttc = parseFloat(newTtc);
     if (!isNaN(ttc)) {
-      // Si pas assujetti à la TVA, on force le calcul avec un taux de 0
-      const effectiveVatRate = settings.isVatEnabled ? newVatRate : 0;
-      setCalculatedAmounts(calculateAmounts(ttc, effectiveVatRate));
+      const result = calculateAmounts(ttc, newVatRate);
+      setCalculatedAmounts(result);
+      setAmount(result.baseAmount.toString());
     } else {
       setCalculatedAmounts({ baseAmount: 0, vatAmount: 0, totalAmount: 0 });
+      setAmount('');
     }
   };
 
@@ -152,12 +221,13 @@ export default function SocialChargesScreen() {
       const newCharge: SocialCharge = {
         id: editingCharge?.id || Date.now().toString(),
         type,
-        amount: calculatedAmounts.baseAmount,
-        vatRate,
-        vatAmount: calculatedAmounts.vatAmount,
-        totalAmount: calculatedAmounts.totalAmount,
+        amount: type === 'URSSAF' ? parseFloat(ttcAmount) || 0 : calculatedAmounts.baseAmount,
+        vatRate: type === 'URSSAF' ? 0 : vatRate,
+        vatAmount: type === 'URSSAF' ? parseFloat(calculatedAmounts.vatAmount.toString()) || 0 : calculatedAmounts.vatAmount,
+        totalAmount: type === 'URSSAF' ? parseFloat(ttcAmount) || 0 : calculatedAmounts.totalAmount,
         dueDate: dueDate.toISOString(),
         status: 'pending',
+        month: type === 'CA Mensuel' ? currentMonth.toISOString() : null,
       };
 
       let newCharges;
@@ -170,14 +240,6 @@ export default function SocialChargesScreen() {
       newCharges = editingCharge
         ? charges.map(charge => (charge.id === editingCharge.id ? newCharge : charge))
         : [...charges, newCharge];
-
-      if (type === 'CA Mensuel') {
-        // Mettre à jour le CA total
-        const newTotalRevenue = newCharges
-          .filter(charge => charge.type === 'CA Mensuel' && charge.status === 'pending')
-          .reduce((sum, charge) => sum + charge.amount, 0);
-        setTotalMonthlyRevenue(newTotalRevenue);
-      }
 
       setCharges(newCharges);
       await saveCharges(newCharges);
@@ -192,6 +254,111 @@ export default function SocialChargesScreen() {
     }
   };
 
+  const addCharge = async () => {
+    if (!type || !dueDate) return;
+
+    try {
+      if (type === 'URSSAF') {
+        // Vérifier s'il y a des CA mensuels en attente pour le mois en cours
+        const pendingCA = charges.filter(charge => 
+          charge.type === 'CA Mensuel' && 
+          charge.status === 'pending' &&
+          new Date(charge.month || '').getMonth() === currentMonth.getMonth()
+        );
+
+        if (pendingCA.length === 0) {
+          Alert.alert('Erreur', 'Aucun CA mensuel en attente pour ce mois.');
+          return;
+        }
+
+        // Sauvegarde des totaux du mois
+        const monthlyTotals = {
+          id: Date.now().toString(),
+          type: 'URSSAF',
+          month: currentMonth.toISOString(),
+          totalCharges: totalPending,
+          formationFee: formationFee,
+          vatToCollect: totalVAT,
+          totalAmount: totalWithFormation,
+          dueDate: dueDate.toISOString(),
+          status: 'pending',
+          amount: totalWithFormation
+        };
+
+        // Marquer tous les CA mensuels du mois en cours comme payés
+        const updatedCharges = charges.map(charge => {
+          if (charge.type === 'CA Mensuel' && charge.status === 'pending') {
+            const chargeMonth = new Date(charge.month || '').getMonth();
+            const currentMonthValue = currentMonth.getMonth();
+            
+            if (chargeMonth === currentMonthValue) {
+              return {
+                ...charge,
+                status: 'paid',
+                paymentDate: new Date().toISOString()
+              };
+            }
+          }
+          return charge;
+        });
+
+        // Ajouter la déclaration URSSAF
+        const finalCharges = [...updatedCharges, monthlyTotals];
+        
+        // Sauvegarder les changements
+        await AsyncStorage.setItem('socialCharges', JSON.stringify(finalCharges));
+        setCharges(finalCharges);
+
+        // Réinitialiser tous les états
+        setTtcAmount('');
+        setAmount('');
+        setDueDate(new Date());
+        setCalculatedAmounts({ baseAmount: 0, vatAmount: 0, totalAmount: 0 });
+        setVatRate(0);
+        setType('CA Mensuel'); // Remettre le type par défaut
+
+        // Afficher un message de confirmation
+        Alert.alert(
+          'Déclaration sauvegardée',
+          'La déclaration URSSAF a été enregistrée et les CA ont été marqués comme payés.'
+        );
+      } else {
+        // Vérifier si le montant est saisi pour un CA Mensuel
+        if (!ttcAmount) {
+          Alert.alert('Erreur', 'Veuillez saisir un montant');
+          return;
+        }
+
+        // Cas normal pour l'ajout d'un CA Mensuel
+        const newCharge = {
+          id: Date.now().toString(),
+          type,
+          amount: parseFloat(ttcAmount),
+          vatRate,
+          vatAmount: calculatedAmounts.vatAmount,
+          totalAmount: calculatedAmounts.totalAmount,
+          dueDate: dueDate.toISOString(),
+          status: 'pending',
+          month: currentMonth.toISOString()
+        };
+
+        const updatedCharges = [...charges, newCharge];
+        await AsyncStorage.setItem('socialCharges', JSON.stringify(updatedCharges));
+        setCharges(updatedCharges);
+
+        // Réinitialiser les champs
+        setTtcAmount('');
+        setAmount('');
+        setDueDate(new Date());
+        setCalculatedAmounts({ baseAmount: 0, vatAmount: 0, totalAmount: 0 });
+        setVatRate(0);
+      }
+    } catch (error) {
+      console.error('Error saving charge:', error);
+      Alert.alert('Erreur', 'Impossible de sauvegarder la charge');
+    }
+  };
+
   const markAsPaid = async (id: string) => {
     try {
       const newCharges = charges.map(charge =>
@@ -201,12 +368,6 @@ export default function SocialChargesScreen() {
       );
       setCharges(newCharges);
       await saveCharges(newCharges);
-
-      // Mettre à jour le CA total si nécessaire
-      const newTotalRevenue = newCharges
-        .filter(charge => charge.type === 'CA Mensuel' && charge.status === 'pending')
-        .reduce((sum, charge) => sum + charge.amount, 0);
-      setTotalMonthlyRevenue(newTotalRevenue);
     } catch (error) {
       console.error('Erreur lors du marquage comme payé:', error);
       Alert.alert('Erreur', 'Impossible de mettre à jour le statut');
@@ -218,12 +379,6 @@ export default function SocialChargesScreen() {
       const newCharges = charges.filter(charge => charge.id !== id);
       setCharges(newCharges);
       await saveCharges(newCharges);
-
-      // Mettre à jour le CA total si nécessaire
-      const newTotalRevenue = newCharges
-        .filter(charge => charge.type === 'CA Mensuel' && charge.status === 'pending')
-        .reduce((sum, charge) => sum + charge.amount, 0);
-      setTotalMonthlyRevenue(newTotalRevenue);
     } catch (error) {
       console.error('Erreur lors de la suppression:', error);
       Alert.alert('Erreur', 'Impossible de supprimer la charge');
@@ -246,193 +401,82 @@ export default function SocialChargesScreen() {
     }
   };
 
-  const totalPending = charges
-    .filter(charge => charge.status === 'pending')
-    .reduce((sum, charge) => {
+  const resetForm = () => {
+    setTtcAmount('');
+    setAmount('');
+    setDueDate(new Date());
+    setCalculatedAmounts({ baseAmount: 0, vatAmount: 0, totalAmount: 0 });
+    setVatRate(0);
+    setType('CA Mensuel');
+  };
+
+  const getMonthlyCharges = () => {
+    const monthlyData: { [key: string]: { charges: number; vat: number; isPaid: boolean } } = {};
+
+    charges.forEach(charge => {
       if (charge.type === 'CA Mensuel') {
-        // Pour le CA Mensuel, on calcule 23,1% du montant HT
-        return sum + (charge.amount * settings.urssafRate / 100);
+        const monthKey = charge.month || '';
+        if (!monthlyData[monthKey]) {
+          monthlyData[monthKey] = { charges: 0, vat: 0, isPaid: false };
+        }
+        
+        if (charge.status === 'pending') {
+          monthlyData[monthKey].charges += (charge.amount * settings.urssafRate / 100);
+          monthlyData[monthKey].vat += (charge.vatAmount || 0);
+          monthlyData[monthKey].isPaid = false;
+        }
       }
-      return sum + charge.amount;
-    }, 0);
+    });
 
-  const totalVAT = charges
-    .filter(charge => charge.status === 'pending')
-    .reduce((sum, charge) => sum + charge.vatAmount, 0);
+    return Object.entries(monthlyData)
+      .sort(([a], [b]) => new Date(b).getTime() - new Date(a).getTime())
+      .map(([month, data]) => ({
+        month: new Date(month),
+        ...data
+      }));
+  };
 
-  const formationFee = totalMonthlyRevenue * 0.002;
-  const totalWithFormation = totalPending + formationFee;
+  const monthlyCharges = getMonthlyCharges();
+
+  if (loading) {
+    return (
+      <View style={styles.container}>
+        <ActivityIndicator size="large" color="#007AFF" />
+      </View>
+    );
+  }
 
   return (
     <View style={styles.container}>
-      <View style={styles.inputContainer}>
-        <View style={styles.pickerContainer}>
-          <Text style={styles.pickerLabel}>Type de charge</Text>
-          <View style={styles.pickerWrapper}>
-            <Picker
-              selectedValue={type}
-              onValueChange={(itemValue) => setType(itemValue)}
-              style={styles.picker}
-              dropdownIconColor="#007AFF"
-            >
-              {CHARGE_TYPES.map((chargeType) => (
-                <Picker.Item
-                  key={chargeType}
-                  label={chargeType}
-                  value={chargeType}
-                  style={styles.pickerItem}
-                />
-              ))}
-            </Picker>
-          </View>
-        </View>
+      <ScrollView style={styles.scrollView}>
+        {monthlyCharges.map((monthData, index) => (
+          <View key={monthData.month.toISOString()} style={styles.monthCard}>
+            <View style={styles.monthHeader}>
+              <Text style={styles.monthTitle}>{formatMonthYear(monthData.month)}</Text>
+              <View style={[styles.statusBadge, monthData.isPaid ? styles.statusPaid : styles.statusPending]}>
+                <Text style={styles.statusText}>
+                  {monthData.isPaid ? 'Payé' : 'En attente'}
+                </Text>
+              </View>
+            </View>
 
-        {type !== 'URSSAF' && (
-          <View>
-            <TextInput
-              style={styles.input}
-              placeholder="Montant TTC"
-              value={ttcAmount}
-              onChangeText={(text) => {
-                setTtcAmount(text);
-                updateAmounts(text, vatRate);
-              }}
-              keyboardType="numeric"
-            />
-            {ttcAmount !== '' && (
-              <View style={styles.amountsContainer}>
-                <Text style={styles.amountText}>Montant HT: {calculatedAmounts.baseAmount.toFixed(2)} €</Text>
-                <Text style={styles.amountText}>TVA ({vatRate}%): {calculatedAmounts.vatAmount.toFixed(2)} €</Text>
-                <Text style={styles.amountText}>Total TTC: {calculatedAmounts.totalAmount.toFixed(2)} €</Text>
+            <View style={styles.chargeRow}>
+              <Text style={styles.chargeLabel}>Charges URSSAF ({settings.urssafRate}%):</Text>
+              <Text style={styles.chargeAmount}>{monthData.charges.toFixed(2)} €</Text>
+            </View>
+
+            {settings.isVatEnabled && (
+              <View style={styles.chargeRow}>
+                <Text style={styles.chargeLabel}>TVA à reverser:</Text>
+                <Text style={styles.chargeAmount}>{monthData.vat.toFixed(2)} €</Text>
               </View>
             )}
-          </View>
-        )}
 
-        {type !== 'URSSAF' && settings.isVatEnabled && (
-          <View style={styles.pickerContainer}>
-            <Text style={styles.pickerLabel}>Taux de TVA</Text>
-            <View style={styles.pickerWrapper}>
-              <Picker
-                selectedValue={vatRate}
-                onValueChange={(itemValue) => {
-                  setVatRate(itemValue);
-                  updateAmounts(ttcAmount, itemValue);
-                }}
-                style={styles.picker}
-                dropdownIconColor="#007AFF"
-              >
-                {VAT_RATES.map((rate) => (
-                  <Picker.Item
-                    key={rate.value.toString()}
-                    label={rate.label}
-                    value={rate.value}
-                    style={styles.pickerItem}
-                  />
-                ))}
-              </Picker>
-            </View>
-          </View>
-        )}
-
-        <TouchableOpacity
-          style={styles.dateButton}
-          onPress={() => setShowDatePicker(true)}>
-          <Text style={styles.dateButtonText}>
-            Date d'échéance: {formatDate(dueDate.toISOString())}
-          </Text>
-          <Ionicons name="calendar-outline" size={20} color="#007AFF" />
-        </TouchableOpacity>
-
-        {showDatePicker && (
-          <DateTimePicker
-            value={dueDate}
-            mode="date"
-            display={Platform.OS === 'ios' ? 'spinner' : 'default'}
-            onChange={onDateChange}
-          />
-        )}
-
-        <TouchableOpacity style={styles.addButton} onPress={addOrUpdateCharge}>
-          <Text style={styles.addButtonText}>
-            {type === 'URSSAF' 
-              ? 'Valider mon CA'
-              : type === 'CA Mensuel'
-                ? 'Ajouter un montant'
-                : editingCharge 
-                  ? 'Modifier la charge' 
-                  : 'Ajouter une charge'}
-          </Text>
-        </TouchableOpacity>
-      </View>
-
-      <View style={styles.totalContainer}>
-        <View style={styles.totalRow}>
-          <Text style={styles.totalLabel}>Total CA en attente:</Text>
-          <Text style={styles.totalAmount}>{totalMonthlyRevenue} €</Text>
-        </View>
-        <View style={styles.totalRow}>
-          <Text style={styles.totalLabel}>
-            Total charges en attente ({settings.urssafRate}% du CA HT):
-          </Text>
-          <Text style={styles.totalAmount}>
-            {totalPending.toFixed(2)} €
-          </Text>
-        </View>
-        <View style={styles.totalRow}>
-          <Text style={styles.totalLabel}>Frais de la formation:</Text>
-          <Text style={styles.totalAmount}>{formationFee} €</Text>
-        </View>
-        <View style={styles.totalRow}>
-          <Text style={styles.totalLabel}>Total TVA à reverser:</Text>
-          <Text style={styles.totalAmount}>{totalVAT.toFixed(2)} €</Text>
-        </View>
-        <View style={styles.totalRow}>
-          <Text style={styles.totalLabel}>Total à payer (hors TVA):</Text>
-          <Text style={[styles.totalAmount, styles.finalAmount]}>{totalWithFormation.toFixed(2)} €</Text>
-        </View>
-      </View>
-
-      <ScrollView style={styles.chargesList}>
-        {charges
-          .sort((a, b) => new Date(a.dueDate).getTime() - new Date(b.dueDate).getTime())
-          .map((charge) => (
-          <View key={charge.id} style={styles.chargeItem}>
-            <View style={styles.chargeInfo}>
-              <Text style={styles.chargeType}>{charge.type}</Text>
-              <Text style={styles.chargeAmount}>HT: {charge.amount} €</Text>
-              {charge.vatRate > 0 && (
-                <>
-                  <Text style={styles.chargeVat}>
-                    TVA ({charge.vatRate}%): {charge.vatAmount} €
-                  </Text>
-                  <Text style={styles.chargeTotalAmount}>
-                    TTC: {charge.totalAmount} €
-                  </Text>
-                </>
-              )}
-              <Text style={styles.chargeDate}>
-                Échéance: {formatDate(charge.dueDate)}
+            <View style={styles.totalRow}>
+              <Text style={styles.totalLabel}>Total à payer:</Text>
+              <Text style={styles.totalAmount}>
+                {(monthData.charges + monthData.vat).toFixed(2)} €
               </Text>
-              {charge.paymentDate && (
-                <Text style={styles.paymentDate}>
-                  Payé le: {formatDate(charge.paymentDate)}
-                </Text>
-              )}
-            </View>
-            <View style={styles.chargeActions}>
-              {charge.status === 'pending' && (
-                <TouchableOpacity
-                  onPress={() => markAsPaid(charge.id)}
-                  style={styles.paidButton}>
-                  <Text style={styles.paidButtonText}>Marquer comme payé</Text>
-                </TouchableOpacity>
-              )}
-              <TouchableOpacity
-                onPress={() => deleteCharge(charge.id)}
-                style={styles.deleteButton}>
-                <Ionicons name="trash-outline" size={20} color="#FF3B30" />
-              </TouchableOpacity>
             </View>
           </View>
         ))}
@@ -444,180 +488,82 @@ export default function SocialChargesScreen() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#f8f9fa',
+    backgroundColor: '#f2f2f7',
   },
-  inputContainer: {
+  scrollView: {
+    flex: 1,
     padding: 16,
-    backgroundColor: '#ffffff',
-    borderBottomWidth: 1,
-    borderBottomColor: '#e5e5e5',
   },
-  pickerContainer: {
+  monthCard: {
+    backgroundColor: 'white',
+    borderRadius: 12,
+    padding: 16,
     marginBottom: 16,
-  },
-  pickerLabel: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#333',
-    marginBottom: 8,
-  },
-  pickerWrapper: {
-    borderWidth: 1,
-    borderColor: '#E0E0E0',
-    borderRadius: 8,
-    backgroundColor: '#FFFFFF',
     shadowColor: '#000',
-    shadowOffset: {
-      width: 0,
-      height: 1,
-    },
+    shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.1,
-    shadowRadius: 2,
-    elevation: 2,
+    shadowRadius: 4,
+    elevation: 3,
   },
-  picker: {
-    height: 50,
-    color: '#333',
-  },
-  pickerItem: {
-    fontSize: 16,
-    color: '#333',
-  },
-  input: {
-    backgroundColor: '#f8f9fa',
-    padding: 12,
-    borderRadius: 8,
-    marginBottom: 16,
-    fontSize: 16,
-    ...Platform.select({
-      web: {
-        outlineStyle: 'none',
-      },
-    }),
-  },
-  dateButton: {
+  monthHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    backgroundColor: '#f8f9fa',
-    padding: 12,
-    borderRadius: 8,
     marginBottom: 16,
   },
-  dateButtonText: {
-    fontSize: 16,
+  monthTitle: {
+    fontSize: 18,
+    fontWeight: '600',
     color: '#1c1c1e',
   },
-  addButton: {
-    backgroundColor: '#007AFF',
-    padding: 12,
-    borderRadius: 8,
+  statusBadge: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 16,
+  },
+  statusPending: {
+    backgroundColor: '#FFE58C',
+  },
+  statusPaid: {
+    backgroundColor: '#34C759',
+  },
+  statusText: {
+    fontSize: 14,
+    fontWeight: '500',
+    color: '#1c1c1e',
+  },
+  chargeRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
     alignItems: 'center',
+    marginBottom: 8,
   },
-  addButtonText: {
-    color: '#ffffff',
+  chargeLabel: {
+    fontSize: 15,
+    color: '#666',
+  },
+  chargeAmount: {
     fontSize: 16,
-    fontWeight: '600',
-  },
-  totalContainer: {
-    padding: 16,
-    backgroundColor: '#ffffff',
-    borderBottomWidth: 1,
-    borderBottomColor: '#e5e5e5',
+    color: '#1c1c1e',
+    fontWeight: '500',
   },
   totalRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 8,
+    marginTop: 8,
+    paddingTop: 8,
+    borderTopWidth: 1,
+    borderTopColor: '#e5e5e5',
   },
   totalLabel: {
     fontSize: 16,
     fontWeight: '600',
-    color: '#333',
+    color: '#1c1c1e',
   },
   totalAmount: {
-    fontSize: 16,
+    fontSize: 18,
     fontWeight: '600',
-    color: '#007AFF',
-  },
-  chargesList: {
-    flex: 1,
-  },
-  chargeItem: {
-    backgroundColor: '#ffffff',
-    padding: 16,
-    borderBottomWidth: 1,
-    borderBottomColor: '#e5e5e5',
-  },
-  chargeInfo: {
-    flex: 1,
-  },
-  chargeType: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#1c1c1e',
-    marginBottom: 4,
-  },
-  chargeAmount: {
-    fontSize: 14,
-    color: '#8E8E93',
-    marginBottom: 2,
-  },
-  chargeVat: {
-    fontSize: 14,
-    color: '#8E8E93',
-    marginBottom: 2,
-  },
-  chargeTotalAmount: {
-    fontSize: 14,
-    fontWeight: '500',
-    color: '#007AFF',
-    marginBottom: 4,
-  },
-  chargeDate: {
-    fontSize: 14,
-    color: '#8E8E93',
-  },
-  paymentDate: {
-    fontSize: 14,
-    color: '#34C759',
-    marginTop: 4,
-  },
-  chargeActions: {
-    flexDirection: 'row',
-    justifyContent: 'flex-end',
-    alignItems: 'center',
-    marginTop: 8,
-  },
-  paidButton: {
-    backgroundColor: '#34C759',
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 6,
-    marginRight: 8,
-  },
-  paidButtonText: {
-    color: '#ffffff',
-    fontSize: 14,
-    fontWeight: '500',
-  },
-  deleteButton: {
-    padding: 8,
-  },
-  amountsContainer: {
-    backgroundColor: '#f8f9fa',
-    padding: 12,
-    borderRadius: 8,
-    marginTop: 8,
-  },
-  amountText: {
-    fontSize: 14,
-    color: '#666',
-    marginBottom: 4,
-  },
-  finalAmount: {
-    fontWeight: 'bold',
     color: '#007AFF',
   },
 });
