@@ -312,28 +312,14 @@ export default function SocialChargesScreen() {
 
   const resetForm = async () => {
     try {
-      // Marquer tous les CA mensuels du mois en cours comme payés
-      const updatedCharges = charges.map(charge => {
-        if (charge.type === 'CA Mensuel' && charge.status === 'pending') {
-          const chargeMonth = new Date(charge.month || '').getMonth();
-          const currentMonthValue = currentMonth.getMonth();
-          
-          if (chargeMonth === currentMonthValue) {
-            return {
-              ...charge,
-              status: 'paid',
-              paymentDate: new Date().toISOString()
-            };
-          }
-        }
-        return charge;
-      });
+      // Filtrer les charges pour ne garder que celles qui ne sont pas en statut 'pending'
+      const updatedCharges = charges.filter(charge => charge.status !== 'pending');
 
       // Sauvegarder les changements
       await AsyncStorage.setItem('charges', JSON.stringify(updatedCharges));
       setCharges(updatedCharges);
 
-      // Réinitialiser tous les champs
+      // Réinitialiser tous les champs du formulaire
       setTtcAmount('');
       setAmount('');
       setDueDate(new Date());
@@ -341,11 +327,20 @@ export default function SocialChargesScreen() {
       setVatRate(0);
       setType('CA Mensuel');
 
+      // Réinitialiser les compteurs globaux
+      const currentYear = new Date().getFullYear();
+      await AsyncStorage.removeItem(`@yearlyVAT_${currentYear}`);
+      await AsyncStorage.removeItem('@validatedCA');
+      await AsyncStorage.removeItem('@currentMonthVAT');
+
       // Afficher un message de confirmation
       Alert.alert(
         'Réinitialisation effectuée',
         'Tous les compteurs ont été remis à zéro.'
       );
+
+      // Recharger les données
+      loadCharges();
     } catch (error) {
       console.error('Error resetting form:', error);
       Alert.alert('Erreur', 'Impossible de réinitialiser les compteurs');
