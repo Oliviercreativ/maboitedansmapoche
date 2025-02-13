@@ -8,6 +8,7 @@ import {
   ScrollView,
   Platform,
   Alert,
+  Modal,
 } from 'react-native';
 import { Picker } from '@react-native-picker/picker';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -43,6 +44,16 @@ interface VATHistory {
   vatAmount: number;
   vatRate: number;
   createdAt: string;
+}
+
+interface ValidationEntry {
+  month: string;
+  totalAmount: number;
+  totalVat: number;
+  socialCharges: number;
+  formationFee: number;
+  validatedAt: string;
+  charges: SocialCharge[];
 }
 
 const CHARGE_TYPES = ['CA Mensuel', 'URSSAF'];
@@ -111,6 +122,9 @@ export default function SocialChargesScreen() {
     totalAmount: 0
   });
   const [vatHistory, setVatHistory] = useState<VATHistory[]>([]);
+  const [pendingMonthlyCharges, setPendingMonthlyCharges] = useState<SocialCharge[]>([]);
+  const [showValidateModal, setShowValidateModal] = useState(false);
+  const [validatedEntries, setValidatedEntries] = useState<ValidationEntry[]>([]);
 
   // Calcul des totaux
   const totalMonthlyRevenue = charges
@@ -143,6 +157,7 @@ export default function SocialChargesScreen() {
     loadCharges();
     loadSettings();
     loadVatHistory();
+    loadValidations();
   }, []);
 
   useEffect(() => {
@@ -167,6 +182,26 @@ export default function SocialChargesScreen() {
       });
     }
   }, [charges, settings.urssafRate, type]);
+
+  useEffect(() => {
+    if (type === 'URSSAF') {
+      const currentMonthStart = new Date();
+      currentMonthStart.setDate(1);
+      currentMonthStart.setHours(0, 0, 0, 0);
+      
+      const monthlyCharges = charges.filter(charge => 
+        charge.type === 'CA Mensuel' && 
+        charge.status === 'pending' &&
+        new Date(charge.month + '-01').getMonth() === currentMonthStart.getMonth()
+      );
+      
+      setPendingMonthlyCharges(monthlyCharges);
+      
+      if (monthlyCharges.length > 0) {
+        setShowValidateModal(true);
+      }
+    }
+  }, [type, charges]);
 
   const loadSettings = async () => {
     try {
@@ -213,6 +248,17 @@ export default function SocialChargesScreen() {
     }
   };
 
+  const loadValidations = async () => {
+    try {
+      const storedValidations = await AsyncStorage.getItem('validatedEntries');
+      if (storedValidations) {
+        setValidatedEntries(JSON.parse(storedValidations));
+      }
+    } catch (error) {
+      console.error('Erreur lors du chargement des validations:', error);
+    }
+  };
+
   const saveCharges = async (newCharges: SocialCharge[]) => {
     try {
       await AsyncStorage.setItem('charges', JSON.stringify(newCharges));
@@ -227,6 +273,14 @@ export default function SocialChargesScreen() {
       await AsyncStorage.setItem('vatHistory', JSON.stringify(history));
     } catch (error) {
       console.error('Erreur lors de la sauvegarde de l\'historique TVA:', error);
+    }
+  };
+
+  const saveValidations = async (entries: ValidationEntry[]) => {
+    try {
+      await AsyncStorage.setItem('validatedEntries', JSON.stringify(entries));
+    } catch (error) {
+      console.error('Erreur lors de la sauvegarde des validations:', error);
     }
   };
 
@@ -395,6 +449,90 @@ export default function SocialChargesScreen() {
       Alert.alert('Erreur', 'Impossible de réinitialiser les compteurs');
     }
   };
+
+  const validateMonthlyRevenue = async () => {
+    try {
+      // Marquer les charges comme validées
+      const updatedCharges = charges.map(charge => {
+        if (pendingMonthlyCharges.some(pc => pc.id === charge.id)) {
+          return {
+            ...charge,
+            status: 'validated' as 'pending' | 'validated' | 'paid'
+          };
+        }
+        return charge;
+      });
+
+      // Calculer les totaux du mois
+      const monthTotal = pendingMonthlyCharges.reduce((sum, charge) => sum + charge.amount, 0);
+      const monthVatTotal = pendingMonthlyCharges.reduce((sum, charge) => sum + (charge.vatAmount || 0), 0);
+      const socialCharges = Math.round(monthTotal * settings.urssafRate) / 100;
+      const formationFee = Math.round(monthTotal * 0.2) / 100;
+
+      const currentMonth = new Date().toISOString().slice(0, 7);
+
+      // Créer l'entrée de validation
+      const validationEntry: ValidationEntry = {
+        month: currentMonth,
+        totalAmount: monthTotal,
+        totalVat: monthVatTotal,
+        socialCharges: socialCharges,
+        formationFee: formationFee,
+        validatedAt: new Date().toISOString(),
+        charges: pendingMonthlyCharges
+      };
+
+      // Mettre à jour les validations
+      const updatedValidations = [
+        ...validatedEntries.filter(v => v.month !== currentMonth),
+        validationEntry
+      ];
+
+      await saveValidations(updatedValidations);
+      await saveCharges(updatedCharges);
+      
+      setValidatedEntries(updatedValidations);
+      setCharges(updatedCharges);
+      setShowValidateModal(false);
+
+      Alert.alert(
+        'Validation effectuée',
+        `CA du mois validé:\n` +
+        `Total HT: ${monthTotal.toFixed(2)} €\n` +
+        `TVA: ${monthVatTotal.toFixed(2)} €\n` +
+        `Charges URSSAF (${settings.urssafRate}%): ${socialCharges.toFixed(2)} €\n` +
+        `Formation (0.2%): ${formationFee.toFixed(2)} €`
+      );
+    } catch (error) {
+      console.error('Erreur lors de la validation du CA:', error);
+      Alert.alert('Erreur', 'Impossible de valider le CA du mois');
+    }
+  };
+
+  const renderValidationHistory = () => (
+    <View style={styles.validationHistoryContainer}>
+      <Text style={styles.validationHistoryTitle}>Historique des validations</Text>
+      {validatedEntries
+        .sort((a, b) => b.month.localeCompare(a.month))
+        .map(entry => (
+          <View key={entry.month} style={styles.validationItem}>
+            <Text style={styles.validationMonth}>
+              {formatMonthYear(new Date(entry.month + '-01'))}
+            </Text>
+            <View style={styles.validationDetails}>
+              <Text style={styles.validationText}>CA HT: {entry.totalAmount.toFixed(2)} €</Text>
+              <Text style={styles.validationText}>TVA: {entry.totalVat.toFixed(2)} €</Text>
+              <Text style={styles.validationText}>
+                URSSAF ({settings.urssafRate}%): {entry.socialCharges.toFixed(2)} €
+              </Text>
+              <Text style={styles.validationText}>
+                Formation (0.2%): {entry.formationFee.toFixed(2)} €
+              </Text>
+            </View>
+          </View>
+        ))}
+    </View>
+  );
 
   return (
     <View style={styles.container}>
@@ -600,6 +738,8 @@ export default function SocialChargesScreen() {
         </View>
       )}
 
+      {settings.isVatEnabled && renderValidationHistory()}
+
       <ScrollView style={styles.chargesList}>
         {charges
           .sort((a, b) => new Date(a.dueDate).getTime() - new Date(b.dueDate).getTime())
@@ -655,6 +795,66 @@ export default function SocialChargesScreen() {
           </View>
         ))}
       </ScrollView>
+
+      <Modal
+        visible={showValidateModal}
+        transparent={true}
+        animationType="slide"
+      >
+        <View style={styles.modalContainer}>
+          <View style={styles.modalContent}>
+            <Text style={styles.modalTitle}>Validation du CA mensuel</Text>
+            <Text style={styles.modalSubtitle}>
+              Veuillez valider le CA du mois avant de déclarer l'URSSAF
+            </Text>
+
+            <View style={styles.chargesList}>
+              {pendingMonthlyCharges.map(charge => (
+                <View key={charge.id} style={styles.chargeItem}>
+                  <Text style={styles.chargeAmount}>
+                    HT: {charge.amount.toFixed(2)} €
+                  </Text>
+                  {charge.vatAmount > 0 && (
+                    <Text style={styles.chargeVat}>
+                      TVA ({charge.vatRate}%): {charge.vatAmount.toFixed(2)} €
+                    </Text>
+                  )}
+                  <Text style={styles.chargeTotal}>
+                    TTC: {charge.ttcAmount.toFixed(2)} €
+                  </Text>
+                </View>
+              ))}
+            </View>
+
+            <View style={styles.modalTotals}>
+              <Text style={styles.totalText}>
+                Total HT: {pendingMonthlyCharges.reduce((sum, c) => sum + c.amount, 0).toFixed(2)} €
+              </Text>
+              <Text style={styles.totalText}>
+                Total TVA: {pendingMonthlyCharges.reduce((sum, c) => sum + (c.vatAmount || 0), 0).toFixed(2)} €
+              </Text>
+            </View>
+
+            <View style={styles.modalButtons}>
+              <TouchableOpacity
+                style={[styles.modalButton, styles.cancelButton]}
+                onPress={() => {
+                  setShowValidateModal(false);
+                  setType('CA Mensuel');
+                }}
+              >
+                <Text style={styles.buttonText}>Annuler</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.modalButton, styles.validateButton]}
+                onPress={validateMonthlyRevenue}
+              >
+                <Text style={styles.buttonText}>Valider</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -926,5 +1126,126 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: '#34495e',
     marginVertical: 2,
+  },
+  validationHistoryContainer: {
+    marginTop: 20,
+    padding: 15,
+    backgroundColor: '#fff',
+    borderRadius: 10,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  validationHistoryTitle: {
+    fontSize: 18,
+    fontWeight: '600',
+    marginBottom: 15,
+    color: '#2c3e50',
+  },
+  validationItem: {
+    marginBottom: 15,
+    padding: 10,
+    backgroundColor: '#f8f9fa',
+    borderRadius: 8,
+    borderLeftWidth: 4,
+    borderLeftColor: '#e74c3c',
+  },
+  validationMonth: {
+    fontSize: 16,
+    fontWeight: '500',
+    marginBottom: 5,
+    color: '#2c3e50',
+  },
+  validationDetails: {
+    marginLeft: 10,
+  },
+  validationText: {
+    fontSize: 14,
+    color: '#34495e',
+    marginVertical: 2,
+  },
+  modalContainer: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  modalContent: {
+    backgroundColor: 'white',
+    borderRadius: 20,
+    padding: 20,
+    width: '90%',
+    maxHeight: '80%',
+  },
+  modalTitle: {
+    fontSize: 20,
+    fontWeight: '600',
+    textAlign: 'center',
+    marginBottom: 10,
+    color: '#2c3e50',
+  },
+  modalSubtitle: {
+    fontSize: 16,
+    textAlign: 'center',
+    marginBottom: 20,
+    color: '#7f8c8d',
+  },
+  chargeItem: {
+    backgroundColor: '#f8f9fa',
+    padding: 15,
+    borderRadius: 10,
+    marginBottom: 10,
+  },
+  chargeAmount: {
+    fontSize: 16,
+    color: '#2c3e50',
+  },
+  chargeVat: {
+    fontSize: 14,
+    color: '#7f8c8d',
+    marginTop: 5,
+  },
+  chargeTotal: {
+    fontSize: 16,
+    fontWeight: '500',
+    color: '#2c3e50',
+    marginTop: 5,
+  },
+  modalTotals: {
+    marginTop: 20,
+    paddingTop: 15,
+    borderTopWidth: 1,
+    borderTopColor: '#eee',
+  },
+  totalText: {
+    fontSize: 16,
+    fontWeight: '500',
+    color: '#2c3e50',
+    marginBottom: 5,
+  },
+  modalButtons: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginTop: 20,
+  },
+  modalButton: {
+    flex: 1,
+    padding: 15,
+    borderRadius: 10,
+    marginHorizontal: 5,
+  },
+  cancelButton: {
+    backgroundColor: '#95a5a6',
+  },
+  validateButton: {
+    backgroundColor: '#2ecc71',
+  },
+  buttonText: {
+    color: 'white',
+    textAlign: 'center',
+    fontSize: 16,
+    fontWeight: '600',
   },
 });
