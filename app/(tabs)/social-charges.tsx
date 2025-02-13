@@ -36,6 +36,15 @@ interface Settings {
   isVatEnabled: boolean;
 }
 
+interface VATHistory {
+  id: string;
+  month: string;
+  baseAmount: number;
+  vatAmount: number;
+  vatRate: number;
+  createdAt: string;
+}
+
 const CHARGE_TYPES = ['CA Mensuel', 'URSSAF'];
 
 const VAT_RATES = [
@@ -101,6 +110,7 @@ export default function SocialChargesScreen() {
     vatAmount: 0,
     totalAmount: 0
   });
+  const [vatHistory, setVatHistory] = useState<VATHistory[]>([]);
 
   // Calcul des totaux
   const totalMonthlyRevenue = charges
@@ -132,6 +142,7 @@ export default function SocialChargesScreen() {
   useEffect(() => {
     loadCharges();
     loadSettings();
+    loadVatHistory();
   }, []);
 
   useEffect(() => {
@@ -191,12 +202,31 @@ export default function SocialChargesScreen() {
     }
   };
 
+  const loadVatHistory = async () => {
+    try {
+      const storedHistory = await AsyncStorage.getItem('vatHistory');
+      if (storedHistory) {
+        setVatHistory(JSON.parse(storedHistory));
+      }
+    } catch (error) {
+      console.error('Erreur lors du chargement de l\'historique TVA:', error);
+    }
+  };
+
   const saveCharges = async (newCharges: SocialCharge[]) => {
     try {
       await AsyncStorage.setItem('charges', JSON.stringify(newCharges));
     } catch (error) {
       console.error('Erreur lors de la sauvegarde des charges:', error);
       Alert.alert('Erreur', 'Impossible de sauvegarder les charges');
+    }
+  };
+
+  const saveVatHistory = async (history: VATHistory[]) => {
+    try {
+      await AsyncStorage.setItem('vatHistory', JSON.stringify(history));
+    } catch (error) {
+      console.error('Erreur lors de la sauvegarde de l\'historique TVA:', error);
     }
   };
 
@@ -215,6 +245,7 @@ export default function SocialChargesScreen() {
   const addCharge = async () => {
     try {
       const parsedAmount = parseFloat(amount);
+      const parsedTtcAmount = parseFloat(ttcAmount);
       const parsedVatRate = parseFloat(vatRate.toString());
 
       if (isNaN(parsedAmount) || parsedAmount <= 0) {
@@ -227,19 +258,36 @@ export default function SocialChargesScreen() {
         return;
       }
 
-      const vatAmount = settings.isVatEnabled && type === 'CA Mensuel' 
-        ? (parsedAmount * parsedVatRate) / 100 
-        : 0;
+      // Utiliser les montants calculés par calculateAmounts
+      const amounts = calculateAmounts(parsedTtcAmount, parsedVatRate);
+
+      // Si c'est un CA Mensuel avec TVA, ajouter à l'historique
+      if (type === 'CA Mensuel' && settings.isVatEnabled && parsedVatRate > 0) {
+        const currentMonth = new Date().toISOString().slice(0, 7);
+        const vatEntry: VATHistory = {
+          id: Date.now().toString(),
+          month: currentMonth,
+          baseAmount: amounts.baseAmount,
+          vatAmount: amounts.vatAmount,
+          vatRate: parsedVatRate,
+          createdAt: new Date().toISOString()
+        };
+        
+        const updatedHistory = [...vatHistory, vatEntry];
+        setVatHistory(updatedHistory);
+        await saveVatHistory(updatedHistory);
+      }
 
       const newCharge: SocialCharge = {
         id: editingCharge?.id || Date.now().toString(),
         type,
-        amount: parsedAmount,
+        amount: amounts.baseAmount,
         vatRate: settings.isVatEnabled ? parsedVatRate : 0,
-        vatAmount: vatAmount,
-        ttcAmount: parsedAmount + vatAmount,
+        vatAmount: amounts.vatAmount,
+        ttcAmount: amounts.totalAmount,
         dueDate: dueDate.toISOString(),
         status: 'pending',
+        month: type === 'CA Mensuel' ? new Date().toISOString().slice(0, 7) : null,
         createdAt: new Date().toISOString(),
       };
 
@@ -262,6 +310,7 @@ export default function SocialChargesScreen() {
       setDueDate(new Date());
       setEditingCharge(null);
       setVatRate(0);
+      setCalculatedAmounts({ baseAmount: 0, vatAmount: 0, totalAmount: 0 });
     } catch (error) {
       console.error('Erreur lors de l\'ajout de la charge:', error);
       Alert.alert('Erreur', 'Impossible d\'ajouter la charge');
@@ -527,6 +576,29 @@ export default function SocialChargesScreen() {
           </Text>
         </View>
       </View>
+
+      {settings.isVatEnabled && (
+        <View style={styles.vatHistoryContainer}>
+          <Text style={styles.vatHistoryTitle}>Historique TVA</Text>
+          {vatHistory
+            .sort((a, b) => b.month.localeCompare(a.month))
+            .map((entry) => (
+              <View key={entry.id} style={styles.vatHistoryItem}>
+                <Text style={styles.vatHistoryMonth}>
+                  {formatMonthYear(new Date(entry.month + '-01'))}
+                </Text>
+                <View style={styles.vatHistoryDetails}>
+                  <Text style={styles.vatHistoryText}>
+                    Base HT: {entry.baseAmount.toFixed(2)} €
+                  </Text>
+                  <Text style={styles.vatHistoryText}>
+                    TVA ({entry.vatRate}%): {entry.vatAmount.toFixed(2)} €
+                  </Text>
+                </View>
+              </View>
+            ))}
+        </View>
+      )}
 
       <ScrollView style={styles.chargesList}>
         {charges
@@ -815,5 +887,44 @@ const styles = StyleSheet.create({
     fontSize: 18,
     fontWeight: '600',
     color: '#007AFF',
+  },
+  vatHistoryContainer: {
+    marginTop: 20,
+    padding: 15,
+    backgroundColor: '#fff',
+    borderRadius: 10,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  vatHistoryTitle: {
+    fontSize: 18,
+    fontWeight: '600',
+    marginBottom: 15,
+    color: '#2c3e50',
+  },
+  vatHistoryItem: {
+    marginBottom: 15,
+    padding: 10,
+    backgroundColor: '#f8f9fa',
+    borderRadius: 8,
+    borderLeftWidth: 4,
+    borderLeftColor: '#3498db',
+  },
+  vatHistoryMonth: {
+    fontSize: 16,
+    fontWeight: '500',
+    marginBottom: 5,
+    color: '#2c3e50',
+  },
+  vatHistoryDetails: {
+    marginLeft: 10,
+  },
+  vatHistoryText: {
+    fontSize: 14,
+    color: '#34495e',
+    marginVertical: 2,
   },
 });
